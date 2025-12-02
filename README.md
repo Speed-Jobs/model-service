@@ -2,13 +2,13 @@
 
 텍스트 임베딩 및 유사도 계산을 담당하는 독립 마이크로서비스입니다.
 
-## 🎯 목적
+##  목적
 
 - 메인 API 서버와 모델 서빙 로직 분리
 - 독립적인 스케일링 및 배포
 - 리소스 효율적 운영
 
-## 📦 구조
+## 구조
 
 ```
 model-service/
@@ -18,7 +18,7 @@ model-service/
 └── README.md           # 이 파일
 ```
 
-## 🚀 로컬 실행
+##  로컬 실행
 
 ### 1. 의존성 설치
 
@@ -38,7 +38,7 @@ python main.py
 
 브라우저에서 `http://localhost:8000/docs` 접속
 
-## 🐳 Docker 실행
+## Docker 실행
 
 ### 1. 이미지 빌드
 
@@ -52,7 +52,7 @@ docker build -t model-service:latest .
 docker run -p 8000:8000 model-service:latest
 ```
 
-## ☸️ Kubernetes 배포
+##  Kubernetes 배포
 
 ### 1. 이미지 푸시
 
@@ -74,7 +74,7 @@ kubectl get pods -l app=model-service
 kubectl logs -f deployment/model-service
 ```
 
-## 📡 API 엔드포인트
+##  API 엔드포인트
 
 ### GET /health
 헬스체크
@@ -107,26 +107,26 @@ curl -X POST http://localhost:8000/similarity \
   }'
 ```
 
-## 🧪 테스트
+## 테스트
 
 ```bash
 # 모델 서비스 시작 후
 pytest ../tests/model_service/test_model_service.py -v
 ```
 
-## 🔧 환경 변수
+##  환경 변수
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
 | `MODEL_NAME` | 사용할 Sentence-BERT 모델 | `sentence-transformers/distiluse-base-multilingual-cased-v2` |
 
-## 📊 리소스 요구사항
+##  리소스 요구사항
 
 - **메모리**: 최소 2GB (권장 4GB)
 - **CPU**: 최소 1 core (권장 2 cores)
 - **디스크**: 약 1GB (모델 캐시)
 
-## 🔍 트러블슈팅
+##  트러블슈팅
 
 ### 모델 로딩 실패
 - 메모리 부족: Pod 메모리 제한 확인
@@ -136,7 +136,7 @@ pytest ../tests/model_service/test_model_service.py -v
 - `initialDelaySeconds` 증가 (모델 로딩 시간)
 - `timeout` 값 조정
 
-## 📝 참고사항
+##  참고사항
 
 - 첫 실행 시 모델 다운로드로 시간 소요 (30초~1분)
 - 모델은 메모리에 캐시되어 재사용됨
