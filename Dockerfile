@@ -41,13 +41,15 @@ ENV MODEL_NAME="sentence-transformers/distiluse-base-multilingual-cased-v2"
 ENV PYTHONUNBUFFERED=1
 
 # 포트 노출
-EXPOSE 8000
+EXPOSE 8001
 
 # 헬스체크 설정
 # 모델 로딩 시간을 고려하여 start-period를 60초로 설정
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8001/health || exit 1
 
 # 실행 명령
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+
 

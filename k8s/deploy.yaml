@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-service
+  namespace: skala-practice
+  labels:
+    app: model-service
+spec: 
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: model-service
+  template:
+    metadata:
+      labels:
+        app: model-service
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: model-service
+        image: amdp-registry.skala-ai.com/skala25a/speedjobs-model:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8001
+          protocol: TCP
+        
+        env:
+        - name: USER_NAME
+          value: speedjobs
+        - name: namespace
+          value: skala-practice
+        - name: MODEL_NAME
+          value: "sentence-transformers/distiluse-base-multilingual-cased-v2"
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1000m"
+          limits:
+            memory: "8Gi"
+            cpu: "2000m"
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12
