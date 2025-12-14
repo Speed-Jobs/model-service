@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: model-service
+  name: speedjobs-model-service
   namespace: skala-practice
   labels:
-    app: model-service
+    app: speedjobs-model-service
 spec: 
   replicas: 2
   strategy:
@@ -14,15 +14,15 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      app: model-service
+      app: speedjobs-model-service
   template:
     metadata:
       labels:
-        app: model-service
+        app: speedjobs-model-service
     spec:
       serviceAccountName: default
       containers:
-      - name: model-service
+      - name: speedjobs-model-service
         image: amdp-registry.skala-ai.com/skala25a/speedjobs-model:1.0.0
         imagePullPolicy: Always
         ports:

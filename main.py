@@ -1,21 +1,13 @@
 """
-Sentence-BERT 모델 서빙 서비스
+Multi-Model Embedding Service
 
-이 서비스는 텍스트 임베딩 생성과 유사도 계산을 담당합니다.
-메인 API 서버와 분리되어 독립적으로 운영됩니다.
+Sentence-Transformers + BGE-M3 텍스트 임베딩 서비스
 
 주요 기능:
-1. /embed: 텍스트를 벡터로 변환
-2. /similarity: 쿼리와 코퍼스 간 유사도 계산
-3. /health: 헬스체크
-
-사용 예시:
-    # 로컬 실행
-    python main.py
-    
-    # Docker 실행
-    docker build -t model-service .
-    docker run -p 8000:8000 model-service
+1. /embed: Sentence-Transformers 임베딩
+2. /embed_bge_m3: BGE-M3 임베딩
+3. /similarity: 유사도 계산
+4. /health: 헬스체크
 """
 
 from fastapi import FastAPI, HTTPException
@@ -25,6 +17,11 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 import os
+
+# BGE-M3용 imports
+from transformers import AutoTokenizer, AutoModel
+import torch
+import torch.nn.functional as F
 
 # ============================================================================
 # 로깅 설정
@@ -36,82 +33,185 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# BGE-M3 Embedder 클래스
+# ============================================================================
+
+class Embedder:
+    """텍스트 임베딩 생성 (Hugging Face Transformers 직접 사용)"""
+    
+    _model: Optional[AutoModel] = None
+    _tokenizer: Optional[AutoTokenizer] = None
+    _device: str = None
+    
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._load_model()
+    
+    def _load_model(self):
+        """임베딩 모델 로드"""
+        if self._model is None:
+            print(f"Loading embedding model: {self.model_name}")
+            print(f"Device: {self._device}")
+            
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self._model = AutoModel.from_pretrained(self.model_name)
+            self._model.to(self._device)
+            self._model.eval()
+            
+            print(f"Embedding model loaded")
+    
+    def _mean_pooling(self, model_output, attention_mask):
+        """Mean Pooling - 토큰 임베딩의 평균"""
+        token_embeddings = model_output[0]
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    
+    async def embed(self, text: str) -> List[float]:
+        """단일 텍스트 임베딩"""
+        if not text:
+            return []
+        
+        with torch.no_grad():
+            # 토큰화
+            encoded_input = self._tokenizer(
+                text,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors='pt'
+            ).to(self._device)
+            
+            # 모델 실행
+            model_output = self._model(**encoded_input)
+            
+            # Mean pooling
+            embedding = self._mean_pooling(model_output, encoded_input['attention_mask'])
+            
+            # 정규화
+            embedding = F.normalize(embedding, p=2, dim=1)
+            
+            return embedding.cpu().numpy()[0].tolist()
+    
+    async def embed_batch(self, texts: List[str], batch_size: int = 32, normalize: bool = True) -> List[List[float]]:
+        """
+        배치 텍스트 임베딩
+        
+        Args:
+            texts: 임베딩할 텍스트 리스트
+            batch_size: 배치 크기
+            normalize: 정규화 여부
+        
+        Returns:
+            임베딩 벡터 리스트
+        """
+        if not texts:
+            return []
+        
+        # 빈 텍스트 필터링
+        valid_texts = [t for t in texts if t]
+        if not valid_texts:
+            return []
+        
+        print(f"🔢 Embedding {len(valid_texts)} texts...")
+        
+        all_embeddings = []
+        
+        with torch.no_grad():
+            for i in range(0, len(valid_texts), batch_size):
+                batch_texts = valid_texts[i:i + batch_size]
+                
+                # 토큰화
+                encoded_input = self._tokenizer(
+                    batch_texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors='pt'
+                ).to(self._device)
+                
+                # 모델 실행
+                model_output = self._model(**encoded_input)
+                
+                # Mean pooling
+                embeddings = self._mean_pooling(model_output, encoded_input['attention_mask'])
+                
+                # 정규화
+                if normalize:
+                    embeddings = F.normalize(embeddings, p=2, dim=1)
+                
+                all_embeddings.append(embeddings.cpu().numpy())
+                
+                if (i + batch_size) % (batch_size * 10) == 0:
+                    print(f"  Progress: {min(i + batch_size, len(valid_texts))}/{len(valid_texts)}")
+        
+        # Concatenate all batches
+        all_embeddings = np.vstack(all_embeddings)
+        
+        print(f"Embeddings generated")
+        return all_embeddings.tolist()
+    
+    def get_embedding_dimension(self) -> int:
+        """임베딩 차원 반환"""
+        # 더미 텍스트로 차원 확인
+        with torch.no_grad():
+            encoded_input = self._tokenizer(
+                "test",
+                padding=True,
+                truncation=True,
+                return_tensors='pt'
+            ).to(self._device)
+            
+            model_output = self._model(**encoded_input)
+            embedding = self._mean_pooling(model_output, encoded_input['attention_mask'])
+            
+            return embedding.shape[1]
+
+# ============================================================================
 # FastAPI 앱 초기화
 # ============================================================================
 app = FastAPI(
-    title="Sentence-BERT Model Service",
-    description="텍스트 임베딩 및 유사도 계산 서비스",
+    title="Multi-Model Embedding Service",
+    description="Sentence-BERT + BGE-M3 텍스트 임베딩 서비스",
     version="1.0.0"
 )
 
 # ============================================================================
-# 전역 변수: 모델 인스턴스 (앱 시작 시 한 번만 로드)
+# 전역 변수: 모델 인스턴스들
 # ============================================================================
+# 기존 Sentence-Transformers 모델
 model: Optional[SentenceTransformer] = None
 MODEL_NAME = os.getenv(
     "MODEL_NAME", 
     "sentence-transformers/distiluse-base-multilingual-cased-v2"
 )
 
+# 새로 추가: BGE-M3 모델
+bge_embedder: Optional[Embedder] = None
+BGE_MODEL_NAME = "BAAI/bge-m3"
+
 # ============================================================================
 # 요청/응답 스키마 정의
 # ============================================================================
 
 class EmbedRequest(BaseModel):
-    """
-    임베딩 생성 요청
-    
-    Attributes:
-        texts: 임베딩을 생성할 텍스트 리스트
-        normalize: 임베딩을 정규화할지 여부 (코사인 유사도 계산 시 True 권장)
-    
-    Example:
-        {
-            "texts": ["Python 개발자", "Backend Engineer"],
-            "normalize": true
-        }
-    """
+    """임베딩 생성 요청"""
     texts: List[str] = Field(..., description="임베딩할 텍스트 리스트", min_items=1)
     normalize: bool = Field(True, description="임베딩 정규화 여부")
 
 class EmbedResponse(BaseModel):
-    """
-    임베딩 생성 응답
-    
-    Attributes:
-        embeddings: 생성된 임베딩 리스트 (각 텍스트마다 하나의 벡터)
-        dimension: 임베딩 차원 수
-        count: 처리된 텍스트 개수
-    """
+    """임베딩 생성 응답"""
     embeddings: List[List[float]] = Field(..., description="생성된 임베딩")
     dimension: int = Field(..., description="임베딩 차원")
     count: int = Field(..., description="처리된 텍스트 수")
 
 class SimilarityRequest(BaseModel):
-    """
-    유사도 계산 요청
-    
-    Attributes:
-        query_text: 쿼리 텍스트 (비교 대상)
-        corpus_embeddings: 비교할 코퍼스의 임베딩 리스트
-    
-    Example:
-        {
-            "query_text": "Python 백엔드 개발자",
-            "corpus_embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]
-        }
-    """
+    """유사도 계산 요청"""
     query_text: str = Field(..., description="쿼리 텍스트")
     corpus_embeddings: List[List[float]] = Field(..., description="코퍼스 임베딩")
 
 class SimilarityResponse(BaseModel):
-    """
-    유사도 계산 응답
-    
-    Attributes:
-        similarities: 각 코퍼스 항목과의 유사도 점수 (0~1 범위)
-        count: 계산된 유사도 개수
-    """
+    """유사도 계산 응답"""
     similarities: List[float] = Field(..., description="유사도 점수 리스트")
     count: int = Field(..., description="계산된 유사도 수")
 
@@ -121,24 +221,24 @@ class SimilarityResponse(BaseModel):
 
 @app.on_event("startup")
 async def load_model():
-    """
-    앱 시작 시 Sentence-BERT 모델을 메모리에 로드합니다.
+    """앱 시작 시 두 개의 임베딩 모델을 로드"""
+    global model, bge_embedder
     
-    이 작업은 시간이 걸릴 수 있으므로 (30초~1분) 
-    Kubernetes livenessProbe의 initialDelaySeconds를 충분히 설정해야 합니다.
-    
-    Note:
-        - 모델은 전역 변수에 저장되어 모든 요청에서 재사용됩니다.
-        - 로딩 실패 시 앱이 시작되지 않습니다.
-    """
-    global model
     try:
-        logger.info(f"모델 로딩 시작: {MODEL_NAME}")
+        # 1. 기존 Sentence-Transformers 모델 로드
+        logger.info(f"📦 Sentence-Transformers 모델 로딩 시작: {MODEL_NAME}")
         model = SentenceTransformer(MODEL_NAME)
-        logger.info(f"모델 로딩 완료: {MODEL_NAME}")
-        logger.info(f"임베딩 차원: {model.get_sentence_embedding_dimension()}")
+        logger.info(f"✅ Sentence-Transformers 모델 로딩 완료")
+        logger.info(f"   차원: {model.get_sentence_embedding_dimension()}")
+        
+        # 2. BGE-M3 모델 로드
+        logger.info(f"📦 BGE-M3 모델 로딩 시작: {BGE_MODEL_NAME}")
+        bge_embedder = Embedder(model_name=BGE_MODEL_NAME)
+        logger.info(f"✅ BGE-M3 모델 로딩 완료")
+        logger.info(f"   차원: {bge_embedder.get_embedding_dimension()}")
+        
     except Exception as e:
-        logger.error(f"모델 로딩 실패: {e}")
+        logger.error(f"❌ 모델 로딩 실패: {e}")
         raise
 
 # ============================================================================
@@ -147,98 +247,58 @@ async def load_model():
 
 @app.get("/health")
 async def health_check():
-    """
-    헬스체크 엔드포인트
+    """헬스체크 엔드포인트"""
     
-    Kubernetes liveness/readiness probe에서 사용됩니다.
-    모델이 정상적으로 로드되었는지 확인합니다.
+    # Sentence-Transformers 상태
+    st_status = {
+        "status": "healthy" if model is not None else "loading",
+        "model_name": MODEL_NAME,
+        "embedding_dimension": model.get_sentence_embedding_dimension() if model else None
+    }
     
-    Returns:
-        status: "healthy" (모델 로드 완료) 또는 "loading" (로딩 중)
-        model_name: 로드된 모델 이름
-        embedding_dimension: 임베딩 차원 (모델 로드 완료 시)
-    
-    Example:
-        GET /health
-        
-        Response:
-        {
-            "status": "healthy",
-            "model_name": "sentence-transformers/distiluse-base-multilingual-cased-v2",
-            "embedding_dimension": 512
-        }
-    """
-    if model is None:
-        return {
-            "status": "loading",
-            "model_name": MODEL_NAME
-        }
+    # BGE-M3 상태
+    bge_status = {
+        "status": "healthy" if bge_embedder is not None else "loading",
+        "model_name": BGE_MODEL_NAME,
+        "device": bge_embedder._device if bge_embedder else None,
+        "embedding_dimension": bge_embedder.get_embedding_dimension() if bge_embedder else None
+    }
     
     return {
-        "status": "healthy",
-        "model_name": MODEL_NAME,
-        "embedding_dimension": model.get_sentence_embedding_dimension()
+        "service": "Multi-Model Embedding Service",
+        "models": {
+            "sentence_transformers": st_status,
+            "bge_m3": bge_status
+        }
     }
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed_texts(request: EmbedRequest):
     """
-    텍스트를 임베딩 벡터로 변환합니다.
+    Sentence-Transformers 모델로 임베딩 생성
     
-    이 엔드포인트는 텍스트 리스트를 받아 각 텍스트를 고차원 벡터로 변환합니다.
-    생성된 임베딩은 의미적 유사도 계산에 사용됩니다.
-    
-    Args:
-        request: 임베딩 요청 (텍스트 리스트 포함)
-    
-    Returns:
-        EmbedResponse: 생성된 임베딩과 메타데이터
-    
-    Raises:
-        HTTPException 503: 모델이 로드되지 않았을 때
-        HTTPException 500: 임베딩 생성 중 오류 발생 시
-    
-    Example:
-        POST /embed
-        {
-            "texts": ["Python 개발자", "Backend Engineer"],
-            "normalize": true
-        }
-        
-        Response:
-        {
-            "embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]],
-            "dimension": 512,
-            "count": 2
-        }
-    
-    Note:
-        - normalize=True 권장 (코사인 유사도 계산 시 필수)
-        - 한 번에 너무 많은 텍스트를 보내면 메모리 부족 가능
-        - 권장 배치 크기: 100개 이하
+    기존 sentence-transformers 라이브러리 사용
     """
-    # 모델 로드 확인
     if model is None:
         raise HTTPException(
             status_code=503,
-            detail="모델이 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요."
+            detail="Sentence-Transformers 모델이 아직 로드되지 않았습니다."
         )
     
     try:
-        logger.debug(f"임베딩 생성 요청: {len(request.texts)}개 텍스트")
+        logger.debug(f"📝 [ST] 임베딩 생성 요청: {len(request.texts)}개 텍스트")
         
         # 임베딩 생성
         embeddings = model.encode(
             request.texts,
             convert_to_numpy=True,
             normalize_embeddings=request.normalize,
-            show_progress_bar=False  # API 서버에서는 진행바 불필요
+            show_progress_bar=False
         )
         
-        # numpy array를 list로 변환 (JSON 직렬화 가능하도록)
         embeddings_list = embeddings.tolist()
         
-        logger.debug(f"임베딩 생성 완료: {len(embeddings_list)}개")
+        logger.debug(f"✅ [ST] 임베딩 생성 완료: {len(embeddings_list)}개")
         
         return EmbedResponse(
             embeddings=embeddings_list,
@@ -247,7 +307,46 @@ async def embed_texts(request: EmbedRequest):
         )
         
     except Exception as e:
-        logger.error(f"임베딩 생성 실패: {e}")
+        logger.error(f"❌ [ST] 임베딩 생성 실패: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"임베딩 생성 중 오류 발생: {str(e)}"
+        )
+
+@app.post("/embed_bge_m3", response_model=EmbedResponse)
+async def embed_texts_bge_m3(request: EmbedRequest):
+    """
+    BGE-M3 모델로 임베딩 생성
+    
+    BAAI/bge-m3 모델 사용 (1024차원)
+    Hugging Face Transformers 직접 사용
+    """
+    if bge_embedder is None:
+        raise HTTPException(
+            status_code=503,
+            detail="BGE-M3 모델이 아직 로드되지 않았습니다."
+        )
+    
+    try:
+        logger.debug(f"📝 [BGE-M3] 임베딩 생성 요청: {len(request.texts)}개 텍스트")
+        
+        # Embedder 클래스의 embed_batch 사용
+        embeddings_list = await bge_embedder.embed_batch(
+            texts=request.texts,
+            batch_size=32,
+            normalize=request.normalize
+        )
+        
+        logger.debug(f"✅ [BGE-M3] 임베딩 생성 완료: {len(embeddings_list)}개")
+        
+        return EmbedResponse(
+            embeddings=embeddings_list,
+            dimension=len(embeddings_list[0]) if embeddings_list else 0,
+            count=len(embeddings_list)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ [BGE-M3] 임베딩 생성 실패: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"임베딩 생성 중 오류 발생: {str(e)}"
@@ -256,70 +355,35 @@ async def embed_texts(request: EmbedRequest):
 @app.post("/similarity", response_model=SimilarityResponse)
 async def calculate_similarity(request: SimilarityRequest):
     """
-    쿼리 텍스트와 코퍼스 임베딩 간의 유사도를 계산합니다.
+    쿼리 텍스트와 코퍼스 임베딩 간의 유사도를 계산
     
-    이 엔드포인트는 쿼리 텍스트를 임베딩으로 변환한 후,
-    미리 계산된 코퍼스 임베딩과의 코사인 유사도를 계산합니다.
-    
-    Args:
-        request: 유사도 계산 요청 (쿼리 텍스트 + 코퍼스 임베딩)
-    
-    Returns:
-        SimilarityResponse: 각 코퍼스 항목과의 유사도 점수
-    
-    Raises:
-        HTTPException 503: 모델이 로드되지 않았을 때
-        HTTPException 500: 유사도 계산 중 오류 발생 시
-    
-    Example:
-        POST /similarity
-        {
-            "query_text": "Python 백엔드 개발자",
-            "corpus_embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]
-        }
-        
-        Response:
-        {
-            "similarities": [0.85, 0.42],
-            "count": 2
-        }
-    
-    Note:
-        - 유사도는 코사인 유사도를 사용합니다 (0~1 범위)
-        - 임베딩이 정규화되어 있으면 내적(dot product)으로 계산 가능
-        - 코퍼스 임베딩은 /embed 엔드포인트로 미리 생성해야 합니다
+    기존 Sentence-Transformers 모델 사용
     """
-    # 모델 로드 확인
     if model is None:
         raise HTTPException(
             status_code=503,
-            detail="모델이 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요."
+            detail="모델이 아직 로드되지 않았습니다."
         )
     
     try:
-        logger.debug(f"유사도 계산 요청: 쿼리 1개 vs 코퍼스 {len(request.corpus_embeddings)}개")
+        logger.debug(f"🔍 유사도 계산 요청: 쿼리 1개 vs 코퍼스 {len(request.corpus_embeddings)}개")
         
-        # 1. 쿼리 텍스트를 임베딩으로 변환
+        # 쿼리 텍스트를 임베딩으로 변환
         query_embedding = model.encode(
             [request.query_text],
             convert_to_numpy=True,
-            normalize_embeddings=True,  # 코사인 유사도를 위해 정규화
+            normalize_embeddings=True,
             show_progress_bar=False
         )
         
-        # 2. 코퍼스 임베딩을 numpy array로 변환
+        # 코퍼스 임베딩
         corpus_embeddings = np.array(request.corpus_embeddings)
         
-        # 3. 코사인 유사도 계산 (정규화된 벡터의 내적)
-        # query_embedding: (1, dim)
-        # corpus_embeddings: (n, dim)
-        # 결과: (n,) - 각 코퍼스 항목과의 유사도
+        # 코사인 유사도 계산
         similarities = np.dot(corpus_embeddings, query_embedding.T).flatten()
-        
-        # 4. numpy array를 list로 변환
         similarities_list = similarities.tolist()
         
-        logger.debug(f"유사도 계산 완료: {len(similarities_list)}개")
+        logger.debug(f"✅ 유사도 계산 완료: {len(similarities_list)}개")
         
         return SimilarityResponse(
             similarities=similarities_list,
@@ -327,7 +391,7 @@ async def calculate_similarity(request: SimilarityRequest):
         )
         
     except Exception as e:
-        logger.error(f"유사도 계산 실패: {e}")
+        logger.error(f"❌ 유사도 계산 실패: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"유사도 계산 중 오류 발생: {str(e)}"
@@ -335,38 +399,39 @@ async def calculate_similarity(request: SimilarityRequest):
 
 @app.get("/")
 async def root():
-    """
-    루트 엔드포인트 - 서비스 정보 제공
-    
-    Returns:
-        서비스 메타데이터 및 사용 가능한 엔드포인트 목록
-    """
+    """루트 엔드포인트 - 서비스 정보 제공"""
     return {
-        "service": "Sentence-BERT Model Service",
+        "service": "Multi-Model Embedding Service",
         "version": "1.0.0",
-        "model": MODEL_NAME,
+        "models": {
+            "sentence_transformers": {
+                "name": MODEL_NAME,
+                "status": "running" if model is not None else "loading"
+            },
+            "bge_m3": {
+                "name": BGE_MODEL_NAME,
+                "status": "running" if bge_embedder is not None else "loading"
+            }
+        },
         "endpoints": {
             "health": "GET /health - 헬스체크",
-            "embed": "POST /embed - 텍스트 임베딩 생성",
+            "embed": "POST /embed - Sentence-Transformers 임베딩",
+            "embed_bge_m3": "POST /embed_bge_m3 - BGE-M3 임베딩",
             "similarity": "POST /similarity - 유사도 계산",
             "docs": "GET /docs - API 문서 (Swagger UI)"
-        },
-        "status": "running" if model is not None else "loading"
+        }
     }
+
 
 # ============================================================================
 # 실행 (개발 환경)
 # ============================================================================
-
 if __name__ == "__main__":
     import uvicorn
     
-    # 개발 환경에서 직접 실행 시
-    # python main.py
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=8000,
         log_level="info"
     )
-

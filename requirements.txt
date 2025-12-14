@@ -1,16 +1,25 @@
-# Sentence-BERT Model Service Dependencies
+# ============================================================================
+# Multi-Model Embedding Service Dependencies
+# ============================================================================
 
 # FastAPI framework
 fastapi
 uvicorn[standard]
 
-# Machine Learning
+# Machine Learning - Sentence-Transformers (기존)
 sentence-transformers
 numpy
 
+# Machine Learning - BGE-M3 (신규 추가)
+transformers
+torch
+
 # Data validation
 pydantic
+pydantic-settings
 
 # Optional: Logging and monitoring
 python-json-logger
 
+# Optional: Environment variables
+python-dotenv
